@@ -225,3 +225,55 @@ def chat_with_document(query: DocumentQuery):
         
     except Exception as e:
         return {"status": "error", "message": str(e)}
+# --- NEW: Model for the Podcast Generator ---
+class PodcastQuery(BaseModel):
+    document_id: str
+
+# --- NEW: The AI Podcast Scriptwriter ---
+@app.post("/generate-podcast-script")
+def generate_podcast_script(query: PodcastQuery):
+    try:
+        # 1. Grab the document from Firebase
+        doc_ref = db.collection('documents').document(query.document_id)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Document not found in database.")
+            
+        doc_data = doc.to_dict()
+        
+        # 2. Format the text for the AI
+        context_string = ""
+        for page in doc_data.get("pages", []):
+            context_string += f"{page['text']}\n"
+
+        # 3. THE PODCAST PROMPT
+        # This prompts Gemini to act as two specific, engaging hosts.
+        prompt = f"""You are an expert scriptwriter for an educational podcast. 
+        Write a highly engaging, conversational podcast script between two hosts discussing the following document titled '{doc_data.get('filename')}'.
+        
+        The Hosts:
+        - Host 1 (Alex): The enthusiastic expert who guides the conversation.
+        - Host 2 (Sam): The curious learner who asks great follow-up questions and makes relatable analogies.
+        
+        Rules:
+        1. The script MUST be based strictly on the provided Source Text. Do not make up facts outside the text.
+        2. Keep the tone fun, casual, and easy to understand (like a radio show or YouTube video).
+        3. Use formatting like [Alex] and [Sam] to indicate who is speaking.
+        4. Include stage directions in parentheses like (laughs) or (mind blown) to make it feel real.
+        
+        Source Text:
+        {context_string}
+        """
+        
+        # 4. Generate the Script
+        response = model.generate_content(prompt)
+        
+        return {
+            "status": "success", 
+            "filename": doc_data.get('filename'),
+            "script": response.text
+        }
+        
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
