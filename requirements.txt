@@ -5,3 +5,5 @@ pydantic
 python-multipart
 PyMuPDF
 firebase-admin
+youtube-transcript-api
+requests
