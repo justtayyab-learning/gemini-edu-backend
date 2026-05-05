@@ -19,11 +19,13 @@ from duckduckgo_search import DDGS
 
 app = FastAPI()
 
-# --- 1. SETUP GEMINI (UPDATED FOR 2026) ---
+# --- 1. SETUP GEMINI (UPDATED FOR MAY 2026) ---
 GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY") 
 genai.configure(api_key=GOOGLE_API_KEY)
-# We are now using Gemini 3 Flash
-model = genai.GenerativeModel('gemini-3-flash') 
+
+# Use 'gemini-3-flash-preview' for the current 2026 Developer Preview
+# Alternatively, 'gemini-flash-latest' will always point to this version.
+model = genai.GenerativeModel('gemini-3-flash-preview') 
 
 # --- 2. SETUP FIREBASE ---
 firebase_credentials = {
@@ -55,7 +57,7 @@ class PodcastQuery(BaseModel):
     document_id: str
 
 @app.get("/")
-def read_root(): return {"status": "success", "message": "Gemini 3 Server Online"}
+def read_root(): return {"status": "success", "message": "Gemini 3 Flash Online"}
 
 # --- AUTO-RESEARCH ---
 @app.post("/auto-research")
@@ -92,7 +94,7 @@ def auto_research(query: ResearchQuery):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# --- CHAT TUTOR ---
+# --- CHAT TUTOR (IRONCLAD VERSION) ---
 @app.post("/chat-with-document")
 def chat_with_document(query: DocumentQuery):
     try:
@@ -103,15 +105,16 @@ def chat_with_document(query: DocumentQuery):
         doc_data = doc.to_dict()
         context_string = "".join([p['text'] for p in doc_data.get("pages", [])])
 
-        prompt = f"Context: {context_string}\n\nQuestion: {query.question}\n\nAnswer using only the context provided. If not found, say you can't find it."
+        prompt = f"Context: {context_string}\n\nQuestion: {query.question}\n\nAnswer using only the context provided. If the information is missing, state that you cannot find it."
         
         response = model.generate_content(prompt)
-        ai_text = response.text if response.text else "The AI was unable to generate a text response."
         
+        # Ensure we return the content as 'answer' to match renderer.js
+        ai_text = response.text if response.text else "The model returned an empty response."
         return {"status": "success", "answer": ai_text}
 
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"API Error: {str(e)}"}
 
 # --- UPLOAD & PODCAST ---
 @app.post("/upload-text")
@@ -132,6 +135,7 @@ def generate_podcast(query: PodcastQuery):
         for line in script:
             voice = "en-US-Journey-D" if line['speaker'] == "Alex" else "en-US-Journey-F"
             synth = tts_client.synthesize_speech(input=texttospeech.SynthesisInput(text=line['text']), voice=texttospeech.VoiceSelectionParams(language_code="en-US", name=voice), audio_config=texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3))
-            audio_segments.append({"audio_base64": base64.b64encode(synth.audio_content).decode('utf-8')})
+            audio_base64 = base64.b64encode(synth.audio_content).decode('utf-8')
+            audio_segments.append({"audio_base64": audio_base64})
         return {"status": "success", "podcast": audio_segments}
     except Exception as e: return {"status": "error", "message": str(e)}
