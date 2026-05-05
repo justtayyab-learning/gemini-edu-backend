@@ -141,14 +141,32 @@ def generate_podcast(query: PodcastQuery):
     try:
         doc = db.collection('documents').document(query.document_id).get().to_dict()
         txt = "".join([p['text'] for p in doc.get("pages", [])])
-        prompt = f"Write a 4-line script about this: {txt}. Return ONLY a JSON array of objects with 'speaker' and 'text'."
+        
+        # We tell the AI EXACTLY which names to use
+        prompt = f"""Write a 4-line script about this: {txt}. 
+        Use exactly two speakers: 'Alex' (the expert) and 'Sam' (the student).
+        Return ONLY a JSON array of objects with 'speaker' and 'text' keys."""
+        
         res = model.generate_content(prompt)
         script = json.loads(res.text.replace("```json", "").replace("```", "").strip())
+        
         audio_segments = []
         for line in script:
-            voice = "en-US-Journey-D" if line['speaker'] == "Alex" else "en-US-Journey-F"
-            synth = tts_client.synthesize_speech(input=texttospeech.SynthesisInput(text=line['text']), voice=texttospeech.VoiceSelectionParams(language_code="en-US", name=voice), audio_config=texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3))
-            audio_base64 = base64.b64encode(synth.audio_content).decode('utf-8')
-            audio_segments.append({"audio_base64": audio_base64})
+            # Better logic: Alex gets the D voice, anyone else gets the F voice
+            name = line.get('speaker', '').strip().lower()
+            voice_name = "en-US-Journey-D" if "alex" in name else "en-US-Journey-F"
+            
+            synth = tts_client.synthesize_speech(
+                input=texttospeech.SynthesisInput(text=line['text']), 
+                voice=texttospeech.VoiceSelectionParams(language_code="en-US", name=voice_name), 
+                audio_config=texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3)
+            )
+            audio_segments.append({
+                "speaker": line['speaker'],
+                "text": line['text'],
+                "audio_base64": base64.b64encode(synth.audio_content).decode('utf-8')
+            })
+            
         return {"status": "success", "podcast": audio_segments}
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e: 
+        return {"status": "error", "message": f"Podcast Error: {str(e)}"}
