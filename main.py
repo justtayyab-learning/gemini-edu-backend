@@ -186,27 +186,60 @@ def auto_research(query: ResearchQuery):
         print(f"Researching topic: {topic}")
         combined_research = f"--- AUTOMATED RESEARCH ON: {topic} ---\n\n"
         
-        # 1. Search the web for the top 3 articles
+        # 1. Search the web
         results = DDGS().text(topic, max_results=3)
         
-        # 2. Visit each website and scrape the text
+        # 2. Scrape the text
         for article in results:
             url = article.get('href')
             combined_research += f"Source: {url}\n"
-            
             try:
-                # Go to the website and wait up to 5 seconds for it to load
-                page = requests.get(url, timeout=5)
+                # We add a "User-Agent" header to look like a real browser (stops some blocks)
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                page = requests.get(url, timeout=5, headers=headers)
                 soup = BeautifulSoup(page.content, 'html.parser')
                 
-                # Strip out all the HTML menus/ads and only keep paragraphs
                 paragraphs = soup.find_all('p')
                 article_text = " ".join([p.get_text() for p in paragraphs])
                 
-                # We limit to 3000 characters per article so we don't overload memory
-                combined_research += article_text[:3000] + "\n\n"
+                if len(article_text) > 100:
+                    combined_research += article_text[:3000] + "\n\n"
+                else:
+                    combined_research += "[Website had no readable content]\n\n"
             except Exception:
                 combined_research += "[Could not read this website]\n\n"
+
+        # 3. Save to Firestore
+        words = combined_research.split()
+        chunk_size = 500
+        extracted_pages = []
+        page_num = 1
+        for i in range(0, len(words), chunk_size):
+            chunk = " ".join(words[i:i + chunk_size])
+            extracted_pages.append({"page_number": page_num, "text": chunk})
+            page_num += 1
+            
+        doc_id = str(uuid.uuid4())
+        filename = f"Research: {topic}"
+        
+        doc_ref = db.collection('documents').document(doc_id)
+        doc_ref.set({
+            "filename": filename,
+            "pages": extracted_pages,
+            "uploaded_at": firestore.SERVER_TIMESTAMP
+        })
+        
+        # THE FIX: We now explicitly send the preview back to the frontend!
+        return {
+            "status": "success", 
+            "message": "Research complete and saved to memory!",
+            "document_id": doc_id,
+            "filename": filename,
+            "scraped_text_preview": combined_research[0:500].replace('\n', ' ') # Send the first 500 chars
+        }
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
         # 3. Save it to your Firestore database (using text-chunking logic)
         words = combined_research.split()
