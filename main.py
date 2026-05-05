@@ -217,8 +217,7 @@ def generate_podcast_audio(query: PodcastQuery):
         response = model.generate_content(prompt)
         
         # Strip markdown if Gemini accidentally adds it
-        clean_json_str = response.text.replace("```json", "").replace("
-```", "").strip()
+        clean_json_str = response.text.replace("```json", "").replace("```", "").strip()
         script_data = json.loads(clean_json_str)
         
         # 3. Generate Audio for each line
