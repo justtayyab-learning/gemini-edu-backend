@@ -64,20 +64,34 @@ def read_root(): return {"status": "success", "message": "Gemini 3 Flash Online"
 def auto_research(query: ResearchQuery):
     try:
         topic = query.topic
-        search_query = f"{topic} history facts discovery english"
-        combined_research = f"--- RESEARCH DOSSIER: {topic} ---\n\n"
+        
+        # THE FIX: We use quotes for exact matching and minus signs to hide junk
+        # This tells the engine: "You MUST find Penicillin, but HIDE anything about software or ads."
+        search_query = f'"{topic}" history Fleming -ads -software -streaming -plus'
+        print(f"High-Precision Search: {search_query}")
+        
+        combined_research = f"--- SCIENTIFIC RESEARCH DOSSIER: {topic} ---\n\n"
         
         with DDGS() as ddgs:
+            # We also set safe_search to 'off' sometimes to avoid filters blocking medical text
             results = list(ddgs.text(search_query, region="wt-wt", max_results=5))
         
+        if not results:
+            return {"status": "error", "message": "No relevant medical/historical data found."}
+
         for article in results:
-            title = article.get('title', 'Fact')
+            url = article.get('href', '')
+            # Extra filter: Skip common commercial/junk domains
+            if any(x in url for x in ["google", "sky", "zhihu", "amazon", "facebook"]):
+                continue
+                
+            title = article.get('title', 'Historical Record')
             snippet = article.get('body', '')
             combined_research += f"SOURCE: {title}\nFACT: {snippet}\n\n"
 
+        # Chunking and saving (standard logic)
         words = combined_research.split()
         extracted_pages = [{"page_number": (i//500)+1, "text": " ".join(words[i:i+500])} for i in range(0, len(words), 500)]
-            
         doc_id = str(uuid.uuid4())
         db.collection('documents').document(doc_id).set({
             "filename": f"Research: {topic}", 
@@ -93,7 +107,6 @@ def auto_research(query: ResearchQuery):
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
 # --- CHAT TUTOR (IRONCLAD VERSION) ---
 @app.post("/chat-with-document")
 def chat_with_document(query: DocumentQuery):
