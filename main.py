@@ -11,7 +11,7 @@ GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY")
 genai.configure(api_key=GOOGLE_API_KEY)
 
 # We will use the Gemini 1.5 Flash model because it is incredibly fast and cheap
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 # 2. Define the data we expect to receive from your future Windows app
 class UserQuery(BaseModel):
