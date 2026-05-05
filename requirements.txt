@@ -7,3 +7,4 @@ PyMuPDF
 firebase-admin
 youtube-transcript-api
 requests
+google-cloud-texttospeech

@@ -2,6 +2,8 @@ import os
 import time
 import uuid
 import re
+import json
+import base64
 from fastapi import FastAPI, File, UploadFile, HTTPException
 import google.generativeai as genai
 from pydantic import BaseModel
@@ -10,6 +12,10 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from youtube_transcript_api import YouTubeTranscriptApi
 
+# --- NEW: Google TTS Libraries ---
+from google.oauth2 import service_account
+from google.cloud import texttospeech
+
 app = FastAPI()
 
 # --- 1. SETUP GEMINI ---
@@ -17,7 +23,7 @@ GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY")
 genai.configure(api_key=GOOGLE_API_KEY)
 model = genai.GenerativeModel('gemini-2.5-flash')
 
-# --- 2. SETUP FIREBASE DATABASE ---
+# --- 2. SETUP FIREBASE & GOOGLE CLOUD ---
 firebase_credentials = {
     "type": "service_account",
     "project_id": os.environ.get("FIREBASE_PROJECT_ID"),
@@ -31,11 +37,15 @@ firebase_credentials = {
     "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{os.environ.get('FIREBASE_CLIENT_EMAIL')}"
 }
 
+# Init Firebase
 if not firebase_admin._apps:
     cred = credentials.Certificate(firebase_credentials)
     firebase_admin.initialize_app(cred)
-
 db = firestore.client()
+
+# Init Google TTS Client using the exact same keys!
+gcp_credentials = service_account.Credentials.from_service_account_info(firebase_credentials)
+tts_client = texttospeech.TextToSpeechClient(credentials=gcp_credentials)
 
 # --- DATA MODELS ---
 class UserQuery(BaseModel):
@@ -48,14 +58,16 @@ class DocumentQuery(BaseModel):
 class YouTubeQuery(BaseModel):
     url: str
 
-# NEW: Model for raw text uploads
 class TextUploadQuery(BaseModel):
     title: str
     text_content: str
 
+class PodcastQuery(BaseModel):
+    document_id: str
+
 @app.get("/")
 def read_root():
-    return {"status": "success", "message": "The Education AI Server is connected to Firebase!"}
+    return {"status": "success", "message": "The Education AI Server is ready!"}
 
 @app.post("/ask")
 def ask_gemini(query: UserQuery):
@@ -86,7 +98,6 @@ async def upload_and_read_pdf(file: UploadFile = File(...)):
         pdf_document.close()
         
         doc_id = str(uuid.uuid4())
-        
         doc_ref = db.collection('documents').document(doc_id)
         doc_ref.set({
             "filename": file.filename,
@@ -94,15 +105,9 @@ async def upload_and_read_pdf(file: UploadFile = File(...)):
             "uploaded_at": firestore.SERVER_TIMESTAMP
         })
         
-        return {
-            "status": "success", 
-            "message": "PDF saved to Firebase permanently!",
-            "document_id": doc_id,
-            "filename": file.filename
-        }
-        
+        return {"status": "success", "document_id": doc_id, "filename": file.filename}
     except Exception as e:
-        return {"status": "error", "message": f"Failed to process PDF: {str(e)}"}
+        return {"status": "error", "message": str(e)}
 
 @app.post("/ingest-youtube")
 def ingest_youtube_video(query: YouTubeQuery):
@@ -114,7 +119,7 @@ def ingest_youtube_video(query: YouTubeQuery):
             video_id = query.url.split("youtu.be/")[1][:11]
             
         if not video_id:
-            return {"status": "error", "message": "Could not find a valid YouTube video ID in that URL."}
+            return {"status": "error", "message": "Could not find valid YouTube ID."}
 
         ytt_api = YouTubeTranscriptApi()
         transcript_list = ytt_api.fetch(video_id)
@@ -122,20 +127,15 @@ def ingest_youtube_video(query: YouTubeQuery):
         extracted_pages = []
         current_text = ""
         page_num = 1
-        
         for index, item in enumerate(transcript_list):
-            text_line = item['text'].replace('\n', ' ')
-            current_text += f"{text_line} "
+            current_text += f"{item['text'].replace('\n', ' ')} "
             if (index + 1) % 20 == 0 or (index + 1) == len(transcript_list):
-                extracted_pages.append({
-                    "page_number": page_num,
-                    "text": current_text.strip()
-                })
+                extracted_pages.append({"page_number": page_num, "text": current_text.strip()})
                 page_num += 1
                 current_text = "" 
         
         doc_id = str(uuid.uuid4())
-        filename = f"YouTube_Video_{video_id}"
+        filename = f"YouTube_{video_id}"
         
         doc_ref = db.collection('documents').document(doc_id)
         doc_ref.set({
@@ -143,35 +143,20 @@ def ingest_youtube_video(query: YouTubeQuery):
             "pages": extracted_pages,
             "uploaded_at": firestore.SERVER_TIMESTAMP
         })
-        
-        return {
-            "status": "success", 
-            "message": "YouTube Video Transcript processed and saved to Firebase!",
-            "document_id": doc_id,
-            "filename": filename,
-            "total_pages": len(extracted_pages)
-        }
-        
+        return {"status": "success", "document_id": doc_id, "filename": filename}
     except Exception as e:
-        return {"status": "error", "message": f"Failed to process YouTube Video: {str(e)}"}
+        return {"status": "error", "message": str(e)}
 
-# --- NEW: Raw Text Ingestion Endpoint ---
 @app.post("/upload-text")
 def upload_raw_text(query: TextUploadQuery):
     try:
-        # Split the giant text block into "pages" of roughly 500 words
         words = query.text_content.split()
         chunk_size = 500
-        
         extracted_pages = []
         page_num = 1
-        
         for i in range(0, len(words), chunk_size):
             chunk = " ".join(words[i:i + chunk_size])
-            extracted_pages.append({
-                "page_number": page_num,
-                "text": chunk
-            })
+            extracted_pages.append({"page_number": page_num, "text": chunk})
             page_num += 1
             
         doc_id = str(uuid.uuid4())
@@ -181,98 +166,98 @@ def upload_raw_text(query: TextUploadQuery):
             "pages": extracted_pages,
             "uploaded_at": firestore.SERVER_TIMESTAMP
         })
-        
-        return {
-            "status": "success", 
-            "message": "Text saved to Firebase permanently!",
-            "document_id": doc_id, 
-            "filename": query.title
-        }
+        return {"status": "success", "document_id": doc_id, "filename": query.title}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# --- RENAME: Changed from chat-with-pdf to chat-with-document ---
 @app.post("/chat-with-document")
 def chat_with_document(query: DocumentQuery):
     try:
         doc_ref = db.collection('documents').document(query.document_id)
         doc = doc_ref.get()
-        
         if not doc.exists:
-            raise HTTPException(status_code=404, detail="Document not found in database.")
+            raise HTTPException(status_code=404, detail="Document not found.")
             
         doc_data = doc.to_dict()
-        
-        context_string = ""
-        for page in doc_data.get("pages", []):
-            context_string += f"\n--- [Page {page['page_number']}] ---\n{page['text']}\n"
+        context_string = "".join([f"\n--- [Page {p['page_number']}] ---\n{p['text']}\n" for p in doc_data.get("pages", [])])
 
-        prompt = f"""You are an expert academic tutor. You are helping a student study from a document named '{doc_data.get('filename')}'.
-        
-        CRITICAL RULES:
-        1. Answer the user's question USING ONLY the Source Context provided below.
-        2. If the answer cannot be found in the Source Context, say exactly: "I cannot find this information in the uploaded document."
-        3. Every time you state a fact, you MUST cite the exact page number using this format: [Page X]. 
-        
-        Source Context:
-        {context_string}
-        
-        User Question: {query.question}
-        """
+        prompt = f"""You are an academic tutor helping a student study '{doc_data.get('filename')}'.
+        1. Answer USING ONLY the Source Context.
+        2. If not found, say "I cannot find this information."
+        3. ALWAYS cite the exact page number like this: [Page X]. 
+        Source Context: {context_string}
+        User Question: {query.question}"""
         
         response = model.generate_content(prompt)
         return {"status": "success", "answer": response.text}
-        
     except Exception as e:
         return {"status": "error", "message": str(e)}
-# --- NEW: Model for the Podcast Generator ---
-class PodcastQuery(BaseModel):
-    document_id: str
 
-# --- NEW: The AI Podcast Scriptwriter ---
-@app.post("/generate-podcast-script")
-def generate_podcast_script(query: PodcastQuery):
+# --- NEW: THE COMPLETE AUDIO PIPELINE ---
+@app.post("/generate-podcast-audio")
+def generate_podcast_audio(query: PodcastQuery):
     try:
-        # 1. Grab the document from Firebase
+        # 1. Get document
         doc_ref = db.collection('documents').document(query.document_id)
         doc = doc_ref.get()
-        
         if not doc.exists:
-            raise HTTPException(status_code=404, detail="Document not found in database.")
+            raise HTTPException(status_code=404, detail="Document not found.")
             
         doc_data = doc.to_dict()
-        
-        # 2. Format the text for the AI
-        context_string = ""
-        for page in doc_data.get("pages", []):
-            context_string += f"{page['text']}\n"
+        context_string = "".join([f"{p['text']}\n" for p in doc_data.get("pages", [])])
 
-        # 3. THE PODCAST PROMPT
-        # This prompts Gemini to act as two specific, engaging hosts.
-        prompt = f"""You are an expert scriptwriter for an educational podcast. 
-        Write a highly engaging, conversational podcast script between two hosts discussing the following document titled '{doc_data.get('filename')}'.
+        # 2. Force Gemini to output pure JSON
+        prompt = f"""Write a short, engaging 4-line podcast script about this text: '{doc_data.get('filename')}'.
+        Host 1 is Alex (expert). Host 2 is Sam (curious).
+        Return ONLY a JSON array of objects with 'speaker' and 'text' keys. Do not use markdown blocks.
+        Example: [{{"speaker": "Alex", "text": "Hello!"}}, {{"speaker": "Sam", "text": "Hi!"}}]
         
-        The Hosts:
-        - Host 1 (Alex): The enthusiastic expert who guides the conversation.
-        - Host 2 (Sam): The curious learner who asks great follow-up questions and makes relatable analogies.
+        Source Text: {context_string}"""
         
-        Rules:
-        1. The script MUST be based strictly on the provided Source Text. Do not make up facts outside the text.
-        2. Keep the tone fun, casual, and easy to understand (like a radio show or YouTube video).
-        3. Use formatting like [Alex] and [Sam] to indicate who is speaking.
-        4. Include stage directions in parentheses like (laughs) or (mind blown) to make it feel real.
-        
-        Source Text:
-        {context_string}
-        """
-        
-        # 4. Generate the Script
         response = model.generate_content(prompt)
         
+        # Strip markdown if Gemini accidentally adds it
+        clean_json_str = response.text.replace("```json", "").replace("
+```", "").strip()
+        script_data = json.loads(clean_json_str)
+        
+        # 3. Generate Audio for each line
+        audio_segments = []
+        
+        for line in script_data:
+            speaker = line.get("speaker")
+            text = line.get("text")
+            
+            # Select voice based on speaker
+            voice_name = "en-US-Journey-D" if speaker == "Alex" else "en-US-Journey-F"
+            
+            synthesis_input = texttospeech.SynthesisInput(text=text)
+            voice = texttospeech.VoiceSelectionParams(
+                language_code="en-US",
+                name=voice_name
+            )
+            audio_config = texttospeech.AudioConfig(
+                audio_encoding=texttospeech.AudioEncoding.MP3
+            )
+            
+            # Call Google Cloud
+            tts_response = tts_client.synthesize_speech(
+                input=synthesis_input, voice=voice, audio_config=audio_config
+            )
+            
+            # Convert raw audio bytes to base64 so we can send it safely over the internet
+            audio_base64 = base64.b64encode(tts_response.audio_content).decode('utf-8')
+            
+            audio_segments.append({
+                "speaker": speaker,
+                "text": text,
+                "audio_base64": audio_base64
+            })
+
         return {
             "status": "success", 
             "filename": doc_data.get('filename'),
-            "script": response.text
+            "podcast": audio_segments
         }
         
     except Exception as e:
