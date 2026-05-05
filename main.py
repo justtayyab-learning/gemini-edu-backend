@@ -116,8 +116,9 @@ def ingest_youtube_video(query: YouTubeQuery):
         if not video_id:
             return {"status": "error", "message": "Could not find a valid YouTube video ID in that URL."}
 
-        # 2. Download the transcript
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+       # 2. Download the transcript
+        ytt_api = YouTubeTranscriptApi()
+        transcript_list = ytt_api.fetch(video_id)
         
         # 3. Format the transcript into "Pages" (chunks of 20 sentences)
         extracted_pages = []
