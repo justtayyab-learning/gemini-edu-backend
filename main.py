@@ -48,28 +48,23 @@ if not firebase_admin._apps:
     firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-# Init Google TTS Client
+# Init Google TTS
 gcp_credentials = service_account.Credentials.from_service_account_info(firebase_credentials)
 tts_client = texttospeech.TextToSpeechClient(credentials=gcp_credentials)
 
 # --- DATA MODELS ---
 class UserQuery(BaseModel):
     question: str
-
 class DocumentQuery(BaseModel):
     document_id: str
     question: str
-
 class YouTubeQuery(BaseModel):
     url: str
-
 class TextUploadQuery(BaseModel):
     title: str
     text_content: str
-
 class PodcastQuery(BaseModel):
     document_id: str
-
 class ResearchQuery(BaseModel):
     topic: str
 
@@ -90,10 +85,8 @@ async def upload_and_read_pdf(file: UploadFile = File(...)):
     try:
         if not file.filename.endswith('.pdf'):
             return {"status": "error", "message": "Please upload a PDF file."}
-
         file_content = await file.read()
         pdf_document = fitz.Document(stream=file_content, filetype="pdf")
-        
         extracted_pages = []
         for page_num in range(len(pdf_document)):
             page = pdf_document.load_page(page_num)
@@ -101,7 +94,6 @@ async def upload_and_read_pdf(file: UploadFile = File(...)):
             if text:
                 extracted_pages.append({"page_number": page_num + 1, "text": text})
         pdf_document.close()
-        
         doc_id = str(uuid.uuid4())
         doc_ref = db.collection('documents').document(doc_id)
         doc_ref.set({"filename": file.filename, "pages": extracted_pages, "uploaded_at": firestore.SERVER_TIMESTAMP})
@@ -115,12 +107,9 @@ def ingest_youtube_video(query: YouTubeQuery):
         video_id = None
         if "v=" in query.url: video_id = query.url.split("v=")[1][:11]
         elif "youtu.be/" in query.url: video_id = query.url.split("youtu.be/")[1][:11]
-            
         if not video_id: return {"status": "error", "message": "Could not find valid YouTube ID."}
-
         ytt_api = YouTubeTranscriptApi()
         transcript_list = ytt_api.fetch(video_id)
-        
         extracted_pages = []
         current_text = ""
         page_num = 1
@@ -130,7 +119,6 @@ def ingest_youtube_video(query: YouTubeQuery):
                 extracted_pages.append({"page_number": page_num, "text": current_text.strip()})
                 page_num += 1
                 current_text = "" 
-        
         doc_id = str(uuid.uuid4())
         filename = f"YouTube_{video_id}"
         doc_ref = db.collection('documents').document(doc_id)
@@ -150,7 +138,6 @@ def upload_raw_text(query: TextUploadQuery):
             chunk = " ".join(words[i:i + chunk_size])
             extracted_pages.append({"page_number": page_num, "text": chunk})
             page_num += 1
-            
         doc_id = str(uuid.uuid4())
         doc_ref = db.collection('documents').document(doc_id)
         doc_ref.set({"filename": query.title, "pages": extracted_pages, "uploaded_at": firestore.SERVER_TIMESTAMP})
@@ -158,63 +145,50 @@ def upload_raw_text(query: TextUploadQuery):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# --- SMART AUTO-RESEARCHER PIPELINE ---
+# --- BULLETPROOF AUTO-RESEARCHER ---
 @app.post("/auto-research")
 def auto_research(query: ResearchQuery):
     try:
-        # 1. Sharpen query for academic/history results
-        original_topic = query.topic
-        search_query = f"{original_topic} history wikipedia" 
-        print(f"Refined Research: {search_query}")
+        topic = query.topic
+        print(f"Researching: {topic}")
         
-        combined_research = f"--- DETAILED RESEARCH ON: {original_topic} ---\n\n"
+        # 1. Get Search Results (DuckDuckGo provides snippets automatically)
+        results = DDGS().text(f"{topic} history fact sheet", max_results=5)
         
-        # 2. Search for the top 3 results
-        results = DDGS().text(search_query, max_results=3)
+        combined_research = f"--- COMPREHENSIVE RESEARCH: {topic} ---\n\n"
         
         for article in results:
-            url = article.get('href')
-            # Blacklist for forums/social media
-            if any(x in url for x in ["facebook", "twitter", "forum", "showthread", "parenting"]):
-                continue
-                
-            combined_research += f"SOURCE_URL: {url}\n"
+            title = article.get('title', 'Untitled')
+            snippet = article.get('body', '')
+            url = article.get('href', '')
             
+            # ALWAYS add the snippet (this works even if we get blocked later)
+            combined_research += f"SOURCE: {title}\nURL: {url}\nSUMMARY: {snippet}\n\n"
+            
+            # 2. Try to scrape for deep details
             try:
-                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/119.0.0.0 Safari/537.36'}
-                page = requests.get(url, timeout=10, headers=headers)
-                soup = BeautifulSoup(page.content, 'html.parser')
-                
-                # FOCUS: Only grab paragraphs that are actually substantial
-                chunks = soup.find_all(['p', 'h2'])
-                article_text = ""
-                for p in chunks:
-                    text = p.get_text().strip()
-                    if len(text) > 120: # Filter out navigation/menu snippets
-                        article_text += text + " "
-                
-                if len(article_text) > 300:
-                    combined_research += article_text[:5000] + "\n\n"
-                else:
-                    combined_research += "[Skipped: Low content or blocked]\n\n"
-            except Exception:
-                continue
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/110.0.0.0'}
+                page = requests.get(url, timeout=5, headers=headers)
+                if page.status_code == 200:
+                    soup = BeautifulSoup(page.content, 'html.parser')
+                    # Grab all paragraphs longer than 40 chars
+                    paragraphs = [p.get_text().strip() for p in soup.find_all('p') if len(p.get_text()) > 40]
+                    full_text = " ".join(paragraphs[:10]) # Take top 10 paragraphs
+                    if len(full_text) > 100:
+                        combined_research += f"FULL DETAIL: {full_text}\n\n"
+            except:
+                continue # If scrape fails, we still have the snippet!
 
-        # 3. Save to Firestore with chunking
+        # 3. Save to Firestore
         words = combined_research.split()
-        chunk_size = 500
         extracted_pages = []
-        page_num = 1
-        for i in range(0, len(words), chunk_size):
-            chunk = " ".join(words[i:i + chunk_size])
-            extracted_pages.append({"page_number": page_num, "text": chunk})
-            page_num += 1
+        for i in range(0, len(words), 500):
+            chunk = " ".join(words[i:i + 500])
+            extracted_pages.append({"page_number": (i // 500) + 1, "text": chunk})
             
         doc_id = str(uuid.uuid4())
-        filename = f"Research: {original_topic}"
-        
         db.collection('documents').document(doc_id).set({
-            "filename": filename, 
+            "filename": f"Research: {topic}", 
             "pages": extracted_pages, 
             "uploaded_at": firestore.SERVER_TIMESTAMP
         })
@@ -222,10 +196,9 @@ def auto_research(query: ResearchQuery):
         return {
             "status": "success", 
             "document_id": doc_id,
-            "filename": filename,
-            "scraped_text_preview": combined_research[0:500].replace('\n', ' ')
+            "filename": f"Research: {topic}",
+            "scraped_text_preview": combined_research[:600].replace('\n', ' ')
         }
-
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -235,15 +208,13 @@ def chat_with_document(query: DocumentQuery):
         doc_ref = db.collection('documents').document(query.document_id)
         doc = doc_ref.get()
         if not doc.exists: raise HTTPException(status_code=404, detail="Document not found.")
-            
         doc_data = doc.to_dict()
-        context_string = "".join([f"\n--- [Page {p['page_number']}] ---\n{p['text']}\n" for p in doc_data.get("pages", [])])
+        context_string = "".join([p['text'] for p in doc_data.get("pages", [])])
 
-        prompt = f"""You are an academic tutor helping a student study '{doc_data.get('filename')}'.
-        Answer the user question using ONLY the provided Source Context. 
-        If you cannot find the answer, state that you cannot find it.
-        Source Context: {context_string}
-        User Question: {query.question}"""
+        prompt = f"""Use the following context to answer the student's question. 
+        Context: {context_string}
+        Question: {query.question}
+        If the answer isn't in the context, say you don't know."""
         
         response = model.generate_content(prompt)
         return {"status": "success", "answer": response.text}
@@ -256,23 +227,15 @@ def generate_podcast_audio(query: PodcastQuery):
         doc_ref = db.collection('documents').document(query.document_id)
         doc = doc_ref.get()
         if not doc.exists: raise HTTPException(status_code=404, detail="Document not found.")
-            
         doc_data = doc.to_dict()
-        context_string = "".join([f"{p['text']}\n" for p in doc_data.get("pages", [])])
-
-        prompt = f"""Write a short, engaging 4-line podcast script about this text: '{doc_data.get('filename')}'.
-        Host 1 is Alex (expert). Host 2 is Sam (curious).
-        Return ONLY a JSON array of objects with 'speaker' and 'text' keys. Do not use markdown blocks.
-        Source Text: {context_string}"""
-        
+        context_string = "".join([p['text'] for p in doc_data.get("pages", [])])
+        prompt = f"Write a 4-line podcast script about this: {context_string}. Return ONLY a JSON array of objects with 'speaker' and 'text'."
         response = model.generate_content(prompt)
         clean_json_str = response.text.replace("```json", "").replace("```", "").strip()
         script_data = json.loads(clean_json_str)
-        
         audio_segments = []
         for line in script_data:
-            speaker = line.get("speaker")
-            text = line.get("text")
+            speaker, text = line.get("speaker"), line.get("text")
             voice_name = "en-US-Journey-D" if speaker == "Alex" else "en-US-Journey-F"
             synthesis_input = texttospeech.SynthesisInput(text=text)
             voice = texttospeech.VoiceSelectionParams(language_code="en-US", name=voice_name)
@@ -280,7 +243,6 @@ def generate_podcast_audio(query: PodcastQuery):
             tts_response = tts_client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
             audio_base64 = base64.b64encode(tts_response.audio_content).decode('utf-8')
             audio_segments.append({"speaker": speaker, "text": text, "audio_base64": audio_base64})
-
-        return {"status": "success", "filename": doc_data.get('filename'), "podcast": audio_segments}
+        return {"status": "success", "podcast": audio_segments}
     except Exception as e:
         return {"status": "error", "message": str(e)}
