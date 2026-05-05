@@ -1,13 +1,16 @@
 import os
 import time
 import uuid
+import re
 from fastapi import FastAPI, File, UploadFile, HTTPException
 import google.generativeai as genai
 from pydantic import BaseModel
 import fitz  
-# --- NEW: Firebase Tools ---
 import firebase_admin
 from firebase_admin import credentials, firestore
+
+# --- NEW: YouTube Library ---
+from youtube_transcript_api import YouTubeTranscriptApi
 
 app = FastAPI()
 
@@ -17,12 +20,10 @@ genai.configure(api_key=GOOGLE_API_KEY)
 model = genai.GenerativeModel('gemini-2.5-flash')
 
 # --- 2. SETUP FIREBASE DATABASE ---
-# We build the secure key using the environment variables from Render
 firebase_credentials = {
     "type": "service_account",
     "project_id": os.environ.get("FIREBASE_PROJECT_ID"),
     "private_key_id": "",
-    # We use .replace to fix how Render handles new lines in the secret key
     "private_key": os.environ.get("FIREBASE_PRIVATE_KEY", "").replace('\\n', '\n'),
     "client_email": os.environ.get("FIREBASE_CLIENT_EMAIL"),
     "client_id": "",
@@ -32,12 +33,10 @@ firebase_credentials = {
     "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{os.environ.get('FIREBASE_CLIENT_EMAIL')}"
 }
 
-# Initialize Firebase
 if not firebase_admin._apps:
     cred = credentials.Certificate(firebase_credentials)
     firebase_admin.initialize_app(cred)
 
-# Connect to Firestore
 db = firestore.client()
 
 # --- DATA MODELS ---
@@ -47,6 +46,10 @@ class UserQuery(BaseModel):
 class DocumentQuery(BaseModel):
     document_id: str
     question: str
+
+# NEW: Model for the YouTube link
+class YouTubeQuery(BaseModel):
+    url: str
 
 @app.get("/")
 def read_root():
@@ -60,7 +63,6 @@ def ask_gemini(query: UserQuery):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# --- UPDATED: Save to Firebase ---
 @app.post("/upload-pdf")
 async def upload_and_read_pdf(file: UploadFile = File(...)):
     try:
@@ -83,7 +85,6 @@ async def upload_and_read_pdf(file: UploadFile = File(...)):
         
         doc_id = str(uuid.uuid4())
         
-        # Save the data PERMANENTLY to Firestore
         doc_ref = db.collection('documents').document(doc_id)
         doc_ref.set({
             "filename": file.filename,
@@ -101,11 +102,67 @@ async def upload_and_read_pdf(file: UploadFile = File(...)):
     except Exception as e:
         return {"status": "error", "message": f"Failed to process PDF: {str(e)}"}
 
-# --- UPDATED: Read from Firebase ---
+# --- NEW: YouTube Ingestion Endpoint ---
+@app.post("/ingest-youtube")
+def ingest_youtube_video(query: YouTubeQuery):
+    try:
+        # 1. Extract the 11-character Video ID from the URL
+        video_id = None
+        if "v=" in query.url:
+            video_id = query.url.split("v=")[1][:11]
+        elif "youtu.be/" in query.url:
+            video_id = query.url.split("youtu.be/")[1][:11]
+            
+        if not video_id:
+            return {"status": "error", "message": "Could not find a valid YouTube video ID in that URL."}
+
+        # 2. Download the transcript
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        
+        # 3. Format the transcript into "Pages" (chunks of 20 sentences)
+        extracted_pages = []
+        current_text = ""
+        page_num = 1
+        
+        for index, item in enumerate(transcript_list):
+            # Clean up the text and add it to our chunk
+            text_line = item['text'].replace('\n', ' ')
+            current_text += f"{text_line} "
+            
+            # Every 20 lines (or at the very end of the video), save it as a "page"
+            if (index + 1) % 20 == 0 or (index + 1) == len(transcript_list):
+                extracted_pages.append({
+                    "page_number": page_num,
+                    "text": current_text.strip()
+                })
+                page_num += 1
+                current_text = "" # Reset for the next page
+        
+        # 4. Save to Firebase exactly like a PDF!
+        doc_id = str(uuid.uuid4())
+        filename = f"YouTube_Video_{video_id}"
+        
+        doc_ref = db.collection('documents').document(doc_id)
+        doc_ref.set({
+            "filename": filename,
+            "pages": extracted_pages,
+            "uploaded_at": firestore.SERVER_TIMESTAMP
+        })
+        
+        return {
+            "status": "success", 
+            "message": "YouTube Video Transcript processed and saved to Firebase!",
+            "document_id": doc_id,
+            "filename": filename,
+            "total_pages": len(extracted_pages)
+        }
+        
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to process YouTube Video: {str(e)}"}
+
 @app.post("/chat-with-pdf")
 def chat_with_pdf(query: DocumentQuery):
     try:
-        # Search Firebase for the document ID
         doc_ref = db.collection('documents').document(query.document_id)
         doc = doc_ref.get()
         
