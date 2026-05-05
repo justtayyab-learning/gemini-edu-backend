@@ -150,36 +150,30 @@ def upload_raw_text(query: TextUploadQuery):
 def auto_research(query: ResearchQuery):
     try:
         topic = query.topic
-        print(f"Researching: {topic}")
+        print(f"--- STARTING RESEARCH FOR: {topic} ---")
         
-        # 1. Get Search Results (DuckDuckGo provides snippets automatically)
-        results = DDGS().text(f"{topic} history fact sheet", max_results=5)
+        # 1. Get Search Results
+        with DDGS() as ddgs:
+            results = list(ddgs.text(f"{topic} facts history", max_results=5))
         
-        combined_research = f"--- COMPREHENSIVE RESEARCH: {topic} ---\n\n"
+        # DEBUG: Print to Render logs so you can see if search worked
+        print(f"Search found {len(results)} results.")
+
+        if not results:
+            return {"status": "error", "message": "Search engine returned zero results. Try a different topic."}
+
+        combined_research = f"--- RESEARCH DATA FOR: {topic} ---\n\n"
         
         for article in results:
-            title = article.get('title', 'Untitled')
-            snippet = article.get('body', '')
-            url = article.get('href', '')
+            title = article.get('title', 'No Title')
+            snippet = article.get('body', 'No Snippet')
+            url = article.get('href', 'No URL')
             
-            # ALWAYS add the snippet (this works even if we get blocked later)
-            combined_research += f"SOURCE: {title}\nURL: {url}\nSUMMARY: {snippet}\n\n"
-            
-            # 2. Try to scrape for deep details
-            try:
-                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/110.0.0.0'}
-                page = requests.get(url, timeout=5, headers=headers)
-                if page.status_code == 200:
-                    soup = BeautifulSoup(page.content, 'html.parser')
-                    # Grab all paragraphs longer than 40 chars
-                    paragraphs = [p.get_text().strip() for p in soup.find_all('p') if len(p.get_text()) > 40]
-                    full_text = " ".join(paragraphs[:10]) # Take top 10 paragraphs
-                    if len(full_text) > 100:
-                        combined_research += f"FULL DETAIL: {full_text}\n\n"
-            except:
-                continue # If scrape fails, we still have the snippet!
+            # Save the summary immediately
+            combined_research += f"FACT: {title}\nSUMMARY: {snippet}\nSOURCE: {url}\n\n"
+            print(f"Captured snippet from: {title}")
 
-        # 3. Save to Firestore
+        # 2. Save to Firestore
         words = combined_research.split()
         extracted_pages = []
         for i in range(0, len(words), 500):
@@ -193,15 +187,16 @@ def auto_research(query: ResearchQuery):
             "uploaded_at": firestore.SERVER_TIMESTAMP
         })
         
+        # We send a BIGGER preview to the frontend now
         return {
             "status": "success", 
             "document_id": doc_id,
             "filename": f"Research: {topic}",
-            "scraped_text_preview": combined_research[:600].replace('\n', ' ')
+            "scraped_text_preview": combined_research[0:1000] # Increased to 1000 chars
         }
     except Exception as e:
-        return {"status": "error", "message": str(e)}
-
+        print(f"RESEARCH ERROR: {str(e)}")
+        return {"status": "error", "message": f"Scraper Error: {str(e)}"}
 @app.post("/chat-with-document")
 def chat_with_document(query: DocumentQuery):
     try:
