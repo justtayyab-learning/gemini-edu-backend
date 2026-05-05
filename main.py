@@ -16,7 +16,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from google.oauth2 import service_account
 from google.cloud import texttospeech
 
-# --- Auto-Researcher Libraries ---
+# --- Auto-Researcher & Scraper Libraries ---
 import requests
 from bs4 import BeautifulSoup
 from duckduckgo_search import DDGS
@@ -158,42 +158,49 @@ def upload_raw_text(query: TextUploadQuery):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# --- IMPROVED: AUTO-RESEARCH PIPELINE ---
+# --- SMART AUTO-RESEARCHER PIPELINE ---
 @app.post("/auto-research")
 def auto_research(query: ResearchQuery):
     try:
-        topic = query.topic
-        print(f"Researching topic: {topic}")
-        combined_research = f"--- AUTOMATED RESEARCH ON: {topic} ---\n\n"
+        # 1. Sharpen query for academic/history results
+        original_topic = query.topic
+        search_query = f"{original_topic} history wikipedia" 
+        print(f"Refined Research: {search_query}")
         
-        # 1. Search the web
-        results = DDGS().text(topic, max_results=3)
+        combined_research = f"--- DETAILED RESEARCH ON: {original_topic} ---\n\n"
         
-        # 2. Visit each website with Aggressive Scraper
+        # 2. Search for the top 3 results
+        results = DDGS().text(search_query, max_results=3)
+        
         for article in results:
             url = article.get('href')
+            # Blacklist for forums/social media
+            if any(x in url for x in ["facebook", "twitter", "forum", "showthread", "parenting"]):
+                continue
+                
             combined_research += f"SOURCE_URL: {url}\n"
             
             try:
-                # Mimic a real Chrome browser to bypass blocks
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
-                }
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/119.0.0.0 Safari/537.36'}
                 page = requests.get(url, timeout=10, headers=headers)
                 soup = BeautifulSoup(page.content, 'html.parser')
                 
-                # Grab paragraphs AND headers for better context
-                chunks = soup.find_all(['p', 'h1', 'h2', 'h3'])
-                article_text = " ".join([c.get_text() for c in chunks])
+                # FOCUS: Only grab paragraphs that are actually substantial
+                chunks = soup.find_all(['p', 'h2'])
+                article_text = ""
+                for p in chunks:
+                    text = p.get_text().strip()
+                    if len(text) > 120: # Filter out navigation/menu snippets
+                        article_text += text + " "
                 
-                if len(article_text) > 200:
-                    combined_research += article_text[:4000] + "\n\n"
+                if len(article_text) > 300:
+                    combined_research += article_text[:5000] + "\n\n"
                 else:
-                    combined_research += "[Site blocked access or had no readable text]\n\n"
-            except Exception as e:
-                combined_research += f"[Error reading site: {str(e)}]\n\n"
+                    combined_research += "[Skipped: Low content or blocked]\n\n"
+            except Exception:
+                continue
 
-        # 3. Save to Firestore
+        # 3. Save to Firestore with chunking
         words = combined_research.split()
         chunk_size = 500
         extracted_pages = []
@@ -204,9 +211,13 @@ def auto_research(query: ResearchQuery):
             page_num += 1
             
         doc_id = str(uuid.uuid4())
-        filename = f"Research: {topic}"
-        doc_ref = db.collection('documents').document(doc_id)
-        doc_ref.set({"filename": filename, "pages": extracted_pages, "uploaded_at": firestore.SERVER_TIMESTAMP})
+        filename = f"Research: {original_topic}"
+        
+        db.collection('documents').document(doc_id).set({
+            "filename": filename, 
+            "pages": extracted_pages, 
+            "uploaded_at": firestore.SERVER_TIMESTAMP
+        })
         
         return {
             "status": "success", 
@@ -214,6 +225,7 @@ def auto_research(query: ResearchQuery):
             "filename": filename,
             "scraped_text_preview": combined_research[0:500].replace('\n', ' ')
         }
+
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -228,8 +240,8 @@ def chat_with_document(query: DocumentQuery):
         context_string = "".join([f"\n--- [Page {p['page_number']}] ---\n{p['text']}\n" for p in doc_data.get("pages", [])])
 
         prompt = f"""You are an academic tutor helping a student study '{doc_data.get('filename')}'.
-        Answer USING ONLY the Source Context provided below. 
-        If the info isn't there, say "I cannot find this information."
+        Answer the user question using ONLY the provided Source Context. 
+        If you cannot find the answer, state that you cannot find it.
         Source Context: {context_string}
         User Question: {query.question}"""
         
