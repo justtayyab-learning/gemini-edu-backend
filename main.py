@@ -8,8 +8,6 @@ from pydantic import BaseModel
 import fitz  
 import firebase_admin
 from firebase_admin import credentials, firestore
-
-# --- NEW: YouTube Library ---
 from youtube_transcript_api import YouTubeTranscriptApi
 
 app = FastAPI()
@@ -47,9 +45,13 @@ class DocumentQuery(BaseModel):
     document_id: str
     question: str
 
-# NEW: Model for the YouTube link
 class YouTubeQuery(BaseModel):
     url: str
+
+# NEW: Model for raw text uploads
+class TextUploadQuery(BaseModel):
+    title: str
+    text_content: str
 
 @app.get("/")
 def read_root():
@@ -102,11 +104,9 @@ async def upload_and_read_pdf(file: UploadFile = File(...)):
     except Exception as e:
         return {"status": "error", "message": f"Failed to process PDF: {str(e)}"}
 
-# --- NEW: YouTube Ingestion Endpoint ---
 @app.post("/ingest-youtube")
 def ingest_youtube_video(query: YouTubeQuery):
     try:
-        # 1. Extract the 11-character Video ID from the URL
         video_id = None
         if "v=" in query.url:
             video_id = query.url.split("v=")[1][:11]
@@ -116,30 +116,24 @@ def ingest_youtube_video(query: YouTubeQuery):
         if not video_id:
             return {"status": "error", "message": "Could not find a valid YouTube video ID in that URL."}
 
-       # 2. Download the transcript
         ytt_api = YouTubeTranscriptApi()
         transcript_list = ytt_api.fetch(video_id)
         
-        # 3. Format the transcript into "Pages" (chunks of 20 sentences)
         extracted_pages = []
         current_text = ""
         page_num = 1
         
         for index, item in enumerate(transcript_list):
-            # Clean up the text and add it to our chunk
             text_line = item['text'].replace('\n', ' ')
             current_text += f"{text_line} "
-            
-            # Every 20 lines (or at the very end of the video), save it as a "page"
             if (index + 1) % 20 == 0 or (index + 1) == len(transcript_list):
                 extracted_pages.append({
                     "page_number": page_num,
                     "text": current_text.strip()
                 })
                 page_num += 1
-                current_text = "" # Reset for the next page
+                current_text = "" 
         
-        # 4. Save to Firebase exactly like a PDF!
         doc_id = str(uuid.uuid4())
         filename = f"YouTube_Video_{video_id}"
         
@@ -161,8 +155,45 @@ def ingest_youtube_video(query: YouTubeQuery):
     except Exception as e:
         return {"status": "error", "message": f"Failed to process YouTube Video: {str(e)}"}
 
-@app.post("/chat-with-pdf")
-def chat_with_pdf(query: DocumentQuery):
+# --- NEW: Raw Text Ingestion Endpoint ---
+@app.post("/upload-text")
+def upload_raw_text(query: TextUploadQuery):
+    try:
+        # Split the giant text block into "pages" of roughly 500 words
+        words = query.text_content.split()
+        chunk_size = 500
+        
+        extracted_pages = []
+        page_num = 1
+        
+        for i in range(0, len(words), chunk_size):
+            chunk = " ".join(words[i:i + chunk_size])
+            extracted_pages.append({
+                "page_number": page_num,
+                "text": chunk
+            })
+            page_num += 1
+            
+        doc_id = str(uuid.uuid4())
+        doc_ref = db.collection('documents').document(doc_id)
+        doc_ref.set({
+            "filename": query.title,
+            "pages": extracted_pages,
+            "uploaded_at": firestore.SERVER_TIMESTAMP
+        })
+        
+        return {
+            "status": "success", 
+            "message": "Text saved to Firebase permanently!",
+            "document_id": doc_id, 
+            "filename": query.title
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# --- RENAME: Changed from chat-with-pdf to chat-with-document ---
+@app.post("/chat-with-document")
+def chat_with_document(query: DocumentQuery):
     try:
         doc_ref = db.collection('documents').document(query.document_id)
         doc = doc_ref.get()
