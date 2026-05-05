@@ -19,10 +19,11 @@ from duckduckgo_search import DDGS
 
 app = FastAPI()
 
-# --- 1. SETUP GEMINI ---
+# --- 1. SETUP GEMINI (UPDATED FOR 2026) ---
 GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY") 
 genai.configure(api_key=GOOGLE_API_KEY)
-model = genai.GenerativeModel('gemini-2.0-flash') # Using stable flash model
+# We are now using Gemini 3 Flash
+model = genai.GenerativeModel('gemini-3-flash') 
 
 # --- 2. SETUP FIREBASE ---
 firebase_credentials = {
@@ -54,14 +55,14 @@ class PodcastQuery(BaseModel):
     document_id: str
 
 @app.get("/")
-def read_root(): return {"status": "success"}
+def read_root(): return {"status": "success", "message": "Gemini 3 Server Online"}
 
 # --- AUTO-RESEARCH ---
 @app.post("/auto-research")
 def auto_research(query: ResearchQuery):
     try:
         topic = query.topic
-        search_query = f"{topic} history facts discovery"
+        search_query = f"{topic} history facts discovery english"
         combined_research = f"--- RESEARCH DOSSIER: {topic} ---\n\n"
         
         with DDGS() as ddgs:
@@ -91,7 +92,7 @@ def auto_research(query: ResearchQuery):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# --- CHAT TUTOR (THE CRITICAL FIX) ---
+# --- CHAT TUTOR ---
 @app.post("/chat-with-document")
 def chat_with_document(query: DocumentQuery):
     try:
@@ -102,21 +103,17 @@ def chat_with_document(query: DocumentQuery):
         doc_data = doc.to_dict()
         context_string = "".join([p['text'] for p in doc_data.get("pages", [])])
 
-        prompt = f"Context: {context_string}\n\nQuestion: {query.question}\n\nAnswer the question using the context. If not found, say you can't find it."
+        prompt = f"Context: {context_string}\n\nQuestion: {query.question}\n\nAnswer using only the context provided. If not found, say you can't find it."
         
         response = model.generate_content(prompt)
+        ai_text = response.text if response.text else "The AI was unable to generate a text response."
         
-        # SAFETY CHECK: Ensure response has text and use the 'answer' key
-        ai_text = response.text if response.text else "The AI generated an empty response."
-        
-        print(f"AI Answer: {ai_text}") # This shows up in your Render logs
         return {"status": "success", "answer": ai_text}
 
     except Exception as e:
-        print(f"Chat Error: {str(e)}")
         return {"status": "error", "message": str(e)}
 
-# --- OTHER ENDPOINTS ---
+# --- UPLOAD & PODCAST ---
 @app.post("/upload-text")
 def upload_text(query: TextUploadQuery):
     doc_id = str(uuid.uuid4())
