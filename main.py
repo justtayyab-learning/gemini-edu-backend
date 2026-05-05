@@ -150,30 +150,46 @@ def upload_raw_text(query: TextUploadQuery):
 def auto_research(query: ResearchQuery):
     try:
         topic = query.topic
-        print(f"--- STARTING RESEARCH FOR: {topic} ---")
+        # 1. Force the search to be in English and use academic keywords
+        search_query = f"{topic} history discovery facts english"
+        print(f"Global Researching: {search_query}")
         
-        # 1. Get Search Results
+        combined_research = f"--- OFFICIAL RESEARCH DOSSIER: {topic} ---\n\n"
+        
+        # 2. Force region to 'wt-wt' (Worldwide) to stop the Swedish results
         with DDGS() as ddgs:
-            results = list(ddgs.text(f"{topic} facts history", max_results=5))
+            # region="wt-wt" is the key here!
+            results = list(ddgs.text(search_query, region="wt-wt", max_results=5))
         
-        # DEBUG: Print to Render logs so you can see if search worked
-        print(f"Search found {len(results)} results.")
-
         if not results:
-            return {"status": "error", "message": "Search engine returned zero results. Try a different topic."}
+            return {"status": "error", "message": "No English results found."}
 
-        combined_research = f"--- RESEARCH DATA FOR: {topic} ---\n\n"
-        
         for article in results:
-            title = article.get('title', 'No Title')
-            snippet = article.get('body', 'No Snippet')
-            url = article.get('href', 'No URL')
-            
-            # Save the summary immediately
-            combined_research += f"FACT: {title}\nSUMMARY: {snippet}\nSOURCE: {url}\n\n"
-            print(f"Captured snippet from: {title}")
+            url = article.get('href', '')
+            # Skip non-English looking URLs or known junk sites
+            if ".se" in url or "forum" in url or "parenting" in url:
+                continue
+                
+            title = article.get('title', 'Untitled')
+            snippet = article.get('body', '')
+            combined_research += f"FACT: {title}\nURL: {url}\nSUMMARY: {snippet}\n\n"
 
-        # 2. Save to Firestore
+            # 3. Aggressive Scrape (English Only)
+            try:
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/119.0.0.0'}
+                page = requests.get(url, timeout=5, headers=headers)
+                # Ensure we are reading text as UTF-8
+                page.encoding = 'utf-8' 
+                
+                if page.status_code == 200:
+                    soup = BeautifulSoup(page.content, 'html.parser')
+                    # Find significant text blocks
+                    paras = [p.get_text().strip() for p in soup.find_all('p') if len(p.get_text()) > 60]
+                    combined_research += " ".join(paras[:8]) + "\n\n"
+            except:
+                continue
+
+        # 4. Save to Firestore
         words = combined_research.split()
         extracted_pages = []
         for i in range(0, len(words), 500):
@@ -187,17 +203,14 @@ def auto_research(query: ResearchQuery):
             "uploaded_at": firestore.SERVER_TIMESTAMP
         })
         
-        # We send a BIGGER preview to the frontend now
         return {
             "status": "success", 
             "document_id": doc_id,
             "filename": f"Research: {topic}",
-            "scraped_text_preview": combined_research[0:1000] # Increased to 1000 chars
+            "scraped_text_preview": combined_research[:800]
         }
     except Exception as e:
-        print(f"RESEARCH ERROR: {str(e)}")
-        return {"status": "error", "message": f"Scraper Error: {str(e)}"}
-@app.post("/chat-with-document")
+        return {"status": "error", "message": str(e)}@app.post("/chat-with-document")
 def chat_with_document(query: DocumentQuery):
     try:
         doc_ref = db.collection('documents').document(query.document_id)
